@@ -1,0 +1,59 @@
+====================================================================
+  iTantra App - Wireless Debugging & Execution Commands Guide
+====================================================================
+
+PREREQUISITES:
+1. Ensure your Android device has Developer Options enabled and Wireless Debugging turned ON.
+2. Ensure ADB is in your system PATH or open terminal from:
+   C:\Users\Ankit\AppData\Local\Android\Sdk\platform-tools
+
+--------------------------------------------------------------------
+STEP 1: Verify Connected Device over Wireless ADB
+--------------------------------------------------------------------
+Run this command in terminal to confirm your phone is connected:
+
+adb devices
+
+(You should see your phone listed, e.g. "192.168.x.x:5555  device")
+
+If pairing wirelessly for the first time:
+adb pair <ip>:<port> <pairing-code>
+adb connect <ip>:<port>
+
+--------------------------------------------------------------------
+STEP 2: Build the Debug APK
+--------------------------------------------------------------------
+Open PowerShell / CMD in C:\_sih2026\deploy and run:
+
+.\gradlew.bat assembleDebug
+
+--------------------------------------------------------------------
+STEP 3: Install APK to Connected Wireless Device
+--------------------------------------------------------------------
+Run this command to build and install the app on your phone:
+
+.\gradlew.bat installDebug
+
+--------------------------------------------------------------------
+STEP 4: Launch the App on Your Device
+--------------------------------------------------------------------
+Run this command to open the app on your phone:
+
+adb shell am start -n com.aistudio.itantra.isro/com.example.MainActivity
+
+--------------------------------------------------------------------
+ALL-IN-ONE COMMAND (Build + Install + Launch in 1 Step)
+--------------------------------------------------------------------
+.\gradlew.bat installDebug ; adb shell am start -n com.aistudio.itantra.isro/com.example.MainActivity
+
+--------------------------------------------------------------------
+STEP 5: View Live App Logs (Optional / Debugging)
+--------------------------------------------------------------------
+adb logcat --pid=$(adb shell pidof -s com.aistudio.itantra.isro)
+
+====================================================================
+
+
+
+git add build.gradle.kts; git commit -m "build(gradle): setup root project gradle configuration"; git push origin main; git add settings.gradle.kts; git commit -m "build(gradle): configure workspace settings and module includes"; git push origin main; git add gradle.properties; git commit -m "build(gradle): define global jvm and caching properties"; git push origin main; git add gradlew.bat; git commit -m "build(wrapper): add windows batch script for gradle"; git push origin main; git add .gitignore; git commit -m "chore(git): define ignore rules for build and ide files"; git push origin main; git add .env.example; git commit -m "chore(env): provide template for environment secrets"; git push origin main; git add app/build.gradle.kts; git commit -m "build(app): specify application dependencies and android plugins"; git push origin main; git add app/src/main/AndroidManifest.xml; git commit -m "feat(core): configure android manifest with necessary permissions"; git push origin main; git add app/src/main/res/values/strings.xml; git commit -m "feat(ui): add application string resources for localization"; git push origin main; git add app/src/main/res/values/colors.xml; git commit -m "feat(ui): define primary color palette and branding"; git push origin main; git add app/src/main/res/values/themes.xml; git commit -m "feat(ui): implement base application styling themes"; git push origin main; git add app/src/main/res/xml/; git commit -m "feat(network): configure android network security policies"; git push origin main; git add app/src/main/res/drawable/ic_launcher_background.xml; git commit -m "feat(ui): add launcher background vector graphic"; git push origin main; git add app/src/main/res/drawable/ic_launcher_foreground.xml; git commit -m "feat(ui): add launcher foreground vector graphic"; git push origin main; git add app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml; git commit -m "feat(ui): setup adaptive application launcher icon"; git push origin main; git add app/src/main/assets/models/model_manifest.json; git commit -m "feat(ai): add model manifest defining STT and TTS architectures"; git push origin main; git add app/src/main/assets/models/hi/; git commit -m "feat(ai): bundle hindi language offline speech models"; git push origin main; git add app/src/main/assets/models/en/; git commit -m "feat(ai): bundle english language offline speech models"; git push origin main; git add app/src/main/assets/models/bn/; git commit -m "feat(ai): bundle bengali language offline speech models"; git push origin main; git add app/src/main/assets/models/ta/; git commit -m "feat(ai): bundle tamil language offline speech models"; git push origin main; git add app/src/main/assets/models/te/; git commit -m "feat(ai): bundle telugu language offline speech models"; git push origin main; git add app/src/main/java/com/example/model/Message.kt; git commit -m "feat(model): create data structure for mesh communication messages"; git push origin main; git add app/src/main/java/com/example/model/Node.kt; git commit -m "feat(model): implement mesh node representation and state"; git push origin main; git add app/src/main/java/com/example/data/AppDatabase.kt; git commit -m "feat(data): setup room database instance for persistent storage"; git push origin main; git add app/src/main/java/com/example/data/MessageDao.kt; git commit -m "feat(data): implement data access object for message logging"; git push origin main; git add app/src/main/java/com/example/audio/AudioController.kt; git commit -m "feat(audio): build audio routing and focus management layer"; git push origin main; git add app/src/main/java/com/example/audio/AlertPlayer.kt; git commit -m "feat(audio): implement emergency siren and haptic alert player"; git push origin main; git add app/src/main/java/com/example/stt/SpeechRecognizer.kt; git commit -m "feat(stt): integrate sherpa-onnx for on-device transcription"; git push origin main; git add app/src/main/java/com/example/stt/VadProcessor.kt; git commit -m "feat(stt): add silero VAD engine for real-time voice endpointing"; git push origin main; git add app/src/main/java/com/example/tts/SpeechSynthesizer.kt; git commit -m "feat(tts): integrate ONNX runtime for offline voice synthesis"; git push origin main; git add app/src/main/java/com/example/translation/Translator.kt; git commit -m "feat(translation): build local translation mapping tables"; git push origin main; git add app/src/main/java/com/example/transport/MeshManager.kt; git commit -m "feat(network): implement multi-hop broadcast routing protocol"; git push origin main; git add app/src/main/java/com/example/transport/WifiDirectTransport.kt; git commit -m "feat(network): add high-bandwidth Wi-Fi Direct transport layer"; git push origin main; git add app/src/main/java/com/example/transport/BluetoothTransport.kt; git commit -m "feat(network): add low-bandwidth fallback Bluetooth transport"; git push origin main; git add app/src/main/java/com/example/viewmodel/MainViewModel.kt; git commit -m "feat(core): construct central UI state orchestration viewmodel"; git push origin main; git add app/src/main/java/com/example/ui/DashboardScreen.kt; git commit -m "feat(ui): create tactical dashboard layout with compose"; git push origin main; git add app/src/main/java/com/example/ui/ChatScreen.kt; git commit -m "feat(ui): implement mesh walkie-talkie messaging interface"; git push origin main; git add app/src/main/java/com/example/MainActivity.kt; git commit -m "feat(core): define application entry point and navigation"; git push origin main; git add tools/; git commit -m "chore(tools): add utilities for AI model conversion to ONNX format"; git push origin main; git add docs/; git commit -m "docs(assets): include architectural diagrams and preview media"; git push origin main; git add LICENSE metadata.json commands.txt; git commit -m "chore(docs): provide project license and deployment instructions"; git push origin main; git add README.md; git commit -m "docs(readme): author primary project documentation"; git push origin main; git add .; git commit -m "chore: track any remaining uncommitted app assets"; git push origin main;
+

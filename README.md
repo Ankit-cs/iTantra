@@ -276,11 +276,3 @@ Issues and PRs are welcome — additional language packs and mesh-transport hard
 
 App source code is [MIT licensed](LICENSE). Bundled third-party models and libraries retain their own upstream licenses (see table above).
 
-<div align="center">
-<br/>
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Ankit-cs/iTantra&type=Date)](https://star-history.com/#Ankit-cs/iTantra&Date)
-
-<sub>If iTantra is useful to you, consider starring the repo.</sub>
-
-</div>
