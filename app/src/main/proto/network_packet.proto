@@ -1,0 +1,18 @@
+syntax = "proto3";
+package com.example.transport.proto;
+option java_package = "com.example.transport.proto";
+option java_multiple_files = false;
+
+message NetworkPacketProto {
+  string packet_id = 1;
+  string sender_id = 2;
+  string sender_callsign = 3;
+  string text = 4;
+  string language_code = 5;
+  bool is_alert = 6;
+  string alert_priority = 7;
+  int64 timestamp = 8;
+  string channel_freq = 9;
+  int32 ttl = 10;
+  int32 relay_hops = 11;
+}
