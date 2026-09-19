@@ -11,7 +11,10 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.sin
 
@@ -27,6 +30,7 @@ class AlertAudioManager(private val context: Context) {
     private var previousMusicVolume: Int = -1
     private var previousAlarmVolume: Int = -1
     private var audioFocusRequest: AudioFocusRequest? = null
+    private var currentTtsTrack: AudioTrack? = null
 
     private val vibrator: Vibrator? by lazy {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -190,6 +194,76 @@ class AlertAudioManager(private val context: Context) {
             vibrator?.cancel()
         } catch (e: Exception) {
             Log.w("AlertAudioManager", "Cancel vibration failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Plays generated TTS audio samples (22050 Hz PCM float) via AudioTrack.
+     */
+    fun playTts(audioData: FloatArray, onDone: () -> Unit = {}) {
+        stopTts()
+        lockAudioFocusForAlert()
+        try {
+            val sampleRate = 22050
+            val minBufSize = AudioTrack.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_FLOAT
+            )
+            val bufferSize = maxOf(minBufSize, audioData.size * 4)
+
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferSize)
+                .setTransferMode(AudioTrack.MODE_STATIC)
+                .build()
+
+            currentTtsTrack = track
+            track.write(audioData, 0, audioData.size, AudioTrack.WRITE_BLOCKING)
+            track.play()
+
+            val durationMs = ((audioData.size.toDouble() / sampleRate) * 1000).toLong()
+            CoroutineScope(Dispatchers.Default).launch {
+                delay(durationMs)
+                withContext(Dispatchers.Main) {
+                    stopTts()
+                    onDone()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("AlertAudioManager", "Failed to play TTS audio", e)
+            stopTts()
+            onDone()
+        }
+    }
+
+    /**
+     * Stops currently playing TTS audio track and releases audio focus.
+     */
+    fun stopTts() {
+        try {
+            currentTtsTrack?.let { track ->
+                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    track.stop()
+                }
+                track.release()
+            }
+            currentTtsTrack = null
+            releaseAlertAudioFocus()
+        } catch (e: Exception) {
+            Log.e("AlertAudioManager", "Error stopping TTS", e)
         }
     }
 }
