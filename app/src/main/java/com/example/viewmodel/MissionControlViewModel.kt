@@ -54,12 +54,9 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
 
     // Audio & Infrastructure Engines
     val alertAudioManager = AlertAudioManager(context)
-    // Shared across both engines: each would otherwise construct its own
-    // BundledModelManager and independently SHA-256-verify every bundled model on
-    // startup — with 9 languages that's ~2GB hashed twice in parallel instead of once.
-    private val sharedModelManager = com.example.model.BundledModelManager(context)
-    val sttEngine: SttEngine = IndicSttEngine(context, viewModelScope, sharedModelManager)
-    val ttsEngine: TtsEngine = IndicTtsEngine(context, alertAudioManager, viewModelScope, sharedModelManager)
+    val modelDownloadManager = com.example.model.ModelDownloadManager(context)
+    val sttEngine: SttEngine = IndicSttEngine(context, viewModelScope, modelDownloadManager)
+    val ttsEngine: TtsEngine = IndicTtsEngine(context, alertAudioManager, viewModelScope, modelDownloadManager)
     val transportLayer: TransportLayer = TacticalMeshTransport(context, viewModelScope)
 
     // Room Persistence
@@ -89,10 +86,15 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
     val ttsPlayingCaption: StateFlow<String?> = ttsEngine.currentlyPlayingText
     val ttsModelInfo: StateFlow<TtsModelInfo> = ttsEngine.modelInfo
 
-    val bundledModelManager = sharedModelManager
-    val languagePacks: StateFlow<Map<String, com.example.model.LanguagePack>> = bundledModelManager.languagePacks
-    val isManifestLoaded: StateFlow<Boolean> = bundledModelManager.isManifestLoaded
-    val verifiedAssets: StateFlow<Map<String, com.example.model.VerifiedAsset>> = bundledModelManager.verifiedAssets
+    val downloadStates: StateFlow<Map<com.example.model.ModelPack, com.example.model.DownloadState>> = modelDownloadManager.downloadStates
+
+    fun downloadModel(pack: com.example.model.ModelPack) {
+        modelDownloadManager.download(pack)
+    }
+
+    fun deleteModel(pack: com.example.model.ModelPack) {
+        modelDownloadManager.delete(pack)
+    }
 
     /** Forces a real reload of a language's on-device models and reports actual measured load time. */
     fun runModelBenchmark(languageCode: String) {
@@ -248,7 +250,7 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
             val packet = NetworkPacket(
                 packetId = "PKT_${UUID.randomUUID().toString().take(8)}",
                 senderId = "MY_NODE_ALPHA",
-                senderCallsign = telemetry.value.nodeCallsign,
+                senderCallsign = telemetry.value.nodeCallsign.takeIf { it.isNotBlank() } ?: android.os.Build.MODEL,
                 text = text,
                 languageCode = language.code,
                 isAlert = isAlert,
@@ -449,8 +451,8 @@ class MissionControlViewModel(application: Application) : AndroidViewModel(appli
         transportLayer.connectToPeer(peer)
     }
 
-    fun disconnectPeer() {
-        transportLayer.disconnect()
+    fun disconnectPeer(peerKey: String) {
+        transportLayer.disconnectPeer(peerKey)
     }
 
     fun switchProtocol(protocol: TransportProtocol) {
