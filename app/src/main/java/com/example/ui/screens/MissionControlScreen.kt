@@ -48,6 +48,7 @@ import com.example.model.TransportProtocol
 import com.example.ui.components.LanguageSelectionSheet
 import com.example.ui.components.PttButtonWithRings
 import com.example.ui.components.TacticalTransceiverHud
+import com.example.ui.components.ModelDownloadGate
 import com.example.ui.theme.MinimalColorsInstance
 import com.example.viewmodel.MissionControlViewModel
 
@@ -74,9 +75,15 @@ fun MissionControlScreen(
     val connectedPeer by viewModel.connectedPeer.collectAsState()
     val connectionStatus by viewModel.connectionStatus.collectAsState()
     val isTtsSpeaking by viewModel.isTtsSpeaking.collectAsState()
+    val downloadStates by viewModel.downloadStates.collectAsState()
 
     var showLanguageSheet by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
+
+    val corePacks = com.example.model.ModelPack.coreTransceiverPacks()
+    val missingPacks = corePacks.filter { pack ->
+        downloadStates[pack] !is com.example.model.DownloadState.Downloaded
+    }
 
     Column(
         modifier = modifier
@@ -87,6 +94,20 @@ fun MissionControlScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(24.dp)
     ) {
+        if (missingPacks.isNotEmpty()) {
+            ModelDownloadGate(
+                requiredPacks = missingPacks,
+                downloadStates = downloadStates,
+                onDownloadAll = {
+                    missingPacks.forEach { pack ->
+                        if (downloadStates[pack] !is com.example.model.DownloadState.Downloading) {
+                            viewModel.downloadModel(pack)
+                        }
+                    }
+                }
+            )
+        }
+
         // Section 1: Screen Title & Connectivity Meta
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -329,12 +350,14 @@ fun MissionControlScreen(
     if (showLanguageSheet) {
         LanguageSelectionSheet(
             selectedLanguage = uiState.selectedLanguage,
+            downloadStates = downloadStates,
             onLanguageSelected = { lang ->
                 viewModel.setSelectedLanguage(lang)
                 showLanguageSheet = false
             },
             onDismiss = { showLanguageSheet = false },
-            onPreviewAudio = { lang -> viewModel.testTtsAudio(lang.sampleAlertPhrase) }
+            onPreviewAudio = { lang -> viewModel.testTtsAudio(lang.sampleAlertPhrase) },
+            onDownloadPack = { pack -> viewModel.downloadModel(pack) }
         )
     }
 }
