@@ -1,7 +1,7 @@
 package com.example.transport
 
 import com.example.model.AlertPriority
-import com.example.model.NetworkPacket
+import com.example.transport.NetworkPacket
 import com.example.transport.proto.NetworkPacketProto
 
 object ProtobufSerializer {
