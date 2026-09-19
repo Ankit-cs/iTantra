@@ -826,58 +826,7 @@ class TacticalMeshTransport(
                     telemetryProvider.updateConnectedPeerInfo(callsign, -52, 10)
                 }
 
-                "PACKET" -> {
-                    val senderId = obj.optString("senderId", "")
-                    if (senderId == myNodeId) return // Drop own echo
 
-                    val packetId = obj.getString("packetId")
-                    // Flood-relay dedup: putIfAbsent is atomic, so if two links deliver the
-                    // same packet at once only the first caller sees null and proceeds —
-                    // stops both duplicate local delivery and relay storms/loops in a mesh
-                    // with more than one path between two nodes (e.g. A-B-C-D with A-D too).
-                    if (seenPacketIds.putIfAbsent(packetId, System.currentTimeMillis()) != null) {
-                        return
-                    }
-
-                    val ttl = obj.optInt("ttl", 6)
-                    val relayHops = obj.optInt("relayHops", 0)
-
-                    val packet = NetworkPacket(
-                        packetId = packetId,
-                        senderId = senderId,
-                        senderCallsign = obj.optString("senderCallsign", "REMOTE-TRANSCEIVER"),
-                        text = obj.getString("text"),
-                        languageCode = obj.optString("languageCode", "en"),
-                        isAlert = obj.optBoolean("isAlert", false),
-                        alertPriority = try {
-                            AlertPriority.valueOf(obj.optString("alertPriority", "ROUTINE"))
-                        } catch (e: Exception) {
-                            AlertPriority.ROUTINE
-                        },
-                        timestamp = obj.optLong("timestamp", System.currentTimeMillis()),
-                        channelFreq = obj.optString("channelFreq", telemetry.value.frequencyGhz),
-                        ttl = ttl,
-                        relayHops = relayHops
-                    )
-
-                    Log.i("TacticalMesh", "Received real packet ${packet.packetId} via $sourceAddress (hop $relayHops): ${packet.text} (Alert=${packet.isAlert})")
-                    scope.launch {
-                        _incomingPackets.emit(packet)
-                    }
-
-                    // Mesh relay: forward on to every OTHER live link (not the one this
-                    // packet just arrived on) as long as hops remain, so a node bridging
-                    // two out-of-range peers (e.g. B between distant A and C) keeps the
-                    // message moving without either endpoint needing a direct link.
-                    if (ttl > 1 && peerLinks.size > 1) {
-                        obj.put("ttl", ttl - 1)
-                        obj.put("relayHops", relayHops + 1)
-                        val forwarded = relayToMeshPeers(obj.toString() + "\n", excludeKey = sourceAddress)
-                        if (forwarded > 0) {
-                            Log.i("TacticalMesh", "Relayed packet $packetId onward to $forwarded peer(s), ttl now ${ttl - 1}")
-                        }
-                    }
-                }
             }
         } catch (e: Exception) {
             Log.w("TacticalMesh", "Malformed packet JSON: ${e.message}")
