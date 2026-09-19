@@ -24,6 +24,6 @@ interface VoiceMessageDao {
     @Query("DELETE FROM voice_transcripts")
     suspend fun clearAll()
 
-    @Query("SELECT COUNT(*) FROM voice_transcripts WHERE isAlert = 1")
+    @Query("SELECT COUNT(*) FROM voice_transcripts WHERE isAlert = 1 AND hasPlayed = 0")
     fun getAlertCount(): Flow<Int>
 }
