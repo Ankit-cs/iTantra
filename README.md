@@ -6,6 +6,8 @@
 
 No internet. No cell towers. No cloud. Speak in your language, the person on the other end hears it in theirs — relayed phone-to-phone over Wi-Fi Direct, Bluetooth and BLE.
 
+🌐 **[Live Website & Companion](https://itantrav1.vercel.app)**
+
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.2-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![Jetpack Compose](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)](https://developer.android.com/jetpack/compose)
 [![Android](https://img.shields.io/badge/Android-API%2024%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://developer.android.com/)
