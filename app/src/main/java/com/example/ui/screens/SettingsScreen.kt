@@ -58,9 +58,6 @@ fun SettingsScreen(
 ) {
     val colors = MinimalColorsInstance
     val uiState by viewModel.uiState.collectAsState()
-    val languagePacks: Map<String, LanguagePack> by viewModel.languagePacks.collectAsState()
-    val verifiedAssets: Map<String, VerifiedAsset> by viewModel.verifiedAssets.collectAsState()
-    val isManifestLoaded: Boolean by viewModel.isManifestLoaded.collectAsState()
     val sttModelInfo by viewModel.sttModelInfo.collectAsState()
     val ttsModelInfo by viewModel.ttsModelInfo.collectAsState()
 
@@ -239,7 +236,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 4: Bundled Neural Models
+        // Section 4: Dynamic Neural Models
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -252,18 +249,8 @@ fun SettingsScreen(
                     fontWeight = FontWeight.Medium,
                     color = colors.textPrimary
                 )
-
-                Text(
-                    text = if (isManifestLoaded) "Manifest verified" else "Loading...",
-                    fontSize = 13.sp,
-                    color = if (isManifestLoaded) colors.accent else colors.textSecondary
-                )
             }
 
-            // Live result of the last "Test" press below — modelInfo only tracks
-            // whichever single language is currently loaded (STT/TTS unload the
-            // previous language before loading the next, to keep RAM down), so this
-            // reads as one shared status line rather than per-row.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -286,76 +273,77 @@ fun SettingsScreen(
                 }
             }
 
+            val downloadStates by viewModel.downloadStates.collectAsState()
+            val corePacks = com.example.model.ModelPack.coreTransceiverPacks()
+            
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (languagePacks.isEmpty()) {
+                corePacks.forEach { pack ->
+                    val state = downloadStates[pack] ?: com.example.model.DownloadState.NotDownloaded
+                    val info = com.example.model.ModelRegistry.getInfo(pack)
+                    val sizeMb = (info?.sizeBytes ?: 0L) / (1024 * 1024)
+
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
                             .background(colors.surface)
                             .border(1.dp, colors.outline, RoundedCornerShape(16.dp))
-                            .padding(16.dp),
-                        contentAlignment = Alignment.Center
+                            .padding(16.dp)
                     ) {
-                        Text(
-                            text = "Reading model_manifest.json...",
-                            fontSize = 13.sp,
-                            color = colors.textSecondary
-                        )
-                    }
-                } else {
-                    SupportedLanguage.entries.forEach { lang ->
-                        val pack = languagePacks[lang.code]
-                        val sttAsset = pack?.stt
-                        val ttsAsset = pack?.tts
-                        val sttVerified = sttAsset?.let { verifiedAssets[it.modelPath] }
-
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(colors.surface)
-                                .border(1.dp, colors.outline, RoundedCornerShape(16.dp))
-                                .padding(16.dp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = pack.displayName,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = colors.textPrimary
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "${sizeMb} MB · ${info?.fileName ?: ""}",
+                                    fontSize = 13.sp,
+                                    color = colors.textSecondary
+                                )
+                                if (state is com.example.model.DownloadState.Downloading) {
                                     Text(
-                                        text = "${lang.englishName} (${lang.nativeName})",
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = colors.textPrimary
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = when {
-                                            sttAsset == null -> "STT not installed · TTS not installed"
-                                            sttVerified == null -> "${sttAsset.name} · verifying..."
-                                            else -> "${sttAsset.name} · ${sttVerified.sizeBytes / 1_000_000} MB" +
-                                                if (ttsAsset == null) " · TTS not installed" else " · TTS ${ttsAsset.name}"
-                                        },
-                                        fontSize = 13.sp,
-                                        color = colors.textSecondary
+                                        text = "${state.progressPercent.toInt()}% downloaded",
+                                        fontSize = 12.sp,
+                                        color = colors.accent
                                     )
                                 }
+                            }
 
-                                OutlinedButton(
-                                    onClick = { viewModel.runModelBenchmark(lang.code) },
-                                    enabled = sttAsset != null,
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.PlayArrow,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
-                                        tint = colors.textPrimary
+                            when (state) {
+                                is com.example.model.DownloadState.Downloaded -> {
+                                    OutlinedButton(
+                                        onClick = { viewModel.deleteModel(pack) },
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Text("Delete", fontSize = 12.sp, color = colors.textPrimary)
+                                    }
+                                }
+                                is com.example.model.DownloadState.Downloading -> {
+                                    Text(
+                                        text = "${state.progressPercent.toInt()}%",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.textPrimary
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Test", fontSize = 12.sp, color = colors.textPrimary)
+                                }
+                                is com.example.model.DownloadState.Queued -> {
+                                    Text("Queued...", fontSize = 12.sp, color = colors.textSecondary)
+                                }
+                                else -> {
+                                    OutlinedButton(
+                                        onClick = { viewModel.downloadModel(pack) },
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Text("Get", fontSize = 12.sp, color = colors.textPrimary)
+                                    }
                                 }
                             }
                         }
