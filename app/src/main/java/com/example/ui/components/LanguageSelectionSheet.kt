@@ -47,9 +47,11 @@ import com.example.ui.theme.MinimalColorsInstance
 @Composable
 fun LanguageSelectionSheet(
     selectedLanguage: SupportedLanguage,
+    downloadStates: Map<com.example.model.ModelPack, com.example.model.DownloadState>,
     onLanguageSelected: (SupportedLanguage) -> Unit,
     onDismiss: () -> Unit,
     onPreviewAudio: (SupportedLanguage) -> Unit,
+    onDownloadPack: (com.example.model.ModelPack) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = MinimalColorsInstance
@@ -119,6 +121,12 @@ fun LanguageSelectionSheet(
             ) {
                 items(SupportedLanguage.entries) { lang ->
                     val isSelected = lang == selectedLanguage
+                    val sttPack = try { com.example.model.ModelPack.valueOf("STT_${lang.name}") } catch (e: Exception) { null }
+                    val ttsPack = try { com.example.model.ModelPack.valueOf("TTS_${lang.name}") } catch (e: Exception) { null }
+                    
+                    val isSttReady = sttPack == null || downloadStates[sttPack] is com.example.model.DownloadState.Downloaded
+                    val isTtsReady = ttsPack == null || downloadStates[ttsPack] is com.example.model.DownloadState.Downloaded
+                    val isReady = isSttReady && isTtsReady
 
                     Box(
                         modifier = Modifier
@@ -129,7 +137,7 @@ fun LanguageSelectionSheet(
                                 color = if (isSelected) colors.accent else colors.outline,
                                 shape = RoundedCornerShape(12.dp)
                             )
-                            .clickable {
+                            .clickable(enabled = isReady) {
                                 onLanguageSelected(lang)
                                 onDismiss()
                             }
@@ -157,19 +165,31 @@ fun LanguageSelectionSheet(
                             }
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .clip(CircleShape)
-                                        .clickable { onPreviewAudio(lang) },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.VolumeUp,
-                                        contentDescription = "Test voice",
-                                        tint = if (isSelected) colors.accent else colors.textSecondary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
+                                if (!isReady) {
+                                    androidx.compose.material3.TextButton(
+                                        onClick = {
+                                            sttPack?.let { onDownloadPack(it) }
+                                            ttsPack?.let { onDownloadPack(it) }
+                                        },
+                                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                                    ) {
+                                        Text("Download", fontSize = 11.sp, color = colors.accent)
+                                    }
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(CircleShape)
+                                            .clickable { onPreviewAudio(lang) },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.VolumeUp,
+                                            contentDescription = "Test voice",
+                                            tint = if (isSelected) colors.accent else colors.textSecondary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
                                 }
 
                                 if (isSelected) {
