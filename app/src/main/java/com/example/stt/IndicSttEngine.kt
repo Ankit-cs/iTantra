@@ -56,7 +56,7 @@ private const val VAD_WINDOW_SAMPLES = 512
 class IndicSttEngine(
     private val context: Context,
     private val scope: CoroutineScope,
-    val bundledModelManager: BundledModelManager = BundledModelManager(context)
+    val modelDownloadManager: com.example.model.ModelDownloadManager = com.example.model.ModelDownloadManager(context)
 ) : SttEngine {
 
     private val _isListening = MutableStateFlow(false)
@@ -99,15 +99,8 @@ class IndicSttEngine(
     private var recordingJob: Job? = null
 
     init {
-        // sherpa-onnx's JNI library resolves onnxruntime's C API (OrtGetApiBase) via the
-        // process's already-loaded native libraries rather than a declared ELF dependency,
-        // so libonnxruntime.so must be dlopen'd before libsherpa-onnx-jni.so ever is.
-        // ai.onnxruntime.OrtEnvironment's own static initializer would normally do this,
-        // but IndicTtsEngine may not have touched it yet by the time we get here.
         System.loadLibrary("onnxruntime")
-
         scope.launch(Dispatchers.IO) {
-            bundledModelManager.loadAndVerifyBundledModels()
             ensureModelsForLanguage(activeLanguage)
         }
     }
@@ -117,52 +110,24 @@ class IndicSttEngine(
         scope.launch(Dispatchers.IO) { ensureModelsForLanguage(language) }
     }
 
-    /**
-     * Forces a fresh (re)load of [language]'s models and reports the real measured
-     * load time via [modelInfo] — used by the Settings screen's "Test" button to
-     * verify a language pack actually loads correctly on this device.
-     */
     suspend fun reloadAndBenchmark(language: SupportedLanguage) {
         withContext(Dispatchers.IO) { ensureModelsForLanguage(language, force = true) }
     }
 
-    /**
-     * Copies `assets/models/$relPath` to internal storage the first time it's needed
-     * (skipped on every subsequent load if the cached copy's size already matches, so
-     * this is a one-time cost per install, not per language switch) and returns the
-     * resulting absolute file path — see the mmap-vs-heap-buffer note in
-     * [ensureModelsForLanguage] for why this matters on low-RAM devices.
-     */
-    private fun extractAssetToFile(relPath: String): String {
-        val outFile = java.io.File(context.filesDir, "models_cache/$relPath")
-        // Compare against the size BundledModelManager already computed while hashing
-        // this asset, rather than assets.openFd() — that call throws for any asset the
-        // build didn't list under androidResources.noCompress (tokens.txt, frontend.json
-        // etc. are still stored zip-compressed, only *.onnx/*.bin are exempted).
-        val expectedSize = bundledModelManager.verifiedAssets.value[relPath]?.sizeBytes
-        if (!outFile.exists() || (expectedSize != null && outFile.length() != expectedSize)) {
-            outFile.parentFile?.mkdirs()
-            // 1MB buffer instead of copyTo()'s 8KB default — the STT model alone is
-            // ~141MB, and the syscall overhead of an 8KB buffer is real time on a
-            // first-run/first-language-switch extraction.
-            context.assets.open("models/$relPath").use { input ->
-                outFile.outputStream().use { output -> input.copyTo(output, bufferSize = 1 shl 20) }
-            }
-        }
-        return outFile.absolutePath
-    }
-
-    /** (Re)builds the Vad + OfflineRecognizer for [language] if not already loaded. */
     private suspend fun ensureModelsForLanguage(language: SupportedLanguage, force: Boolean = false) {
         modelLock.withLock {
             if (!force && loadedLanguageCode == language.code && recognizer != null && vad != null) return
 
-            val pack = bundledModelManager.languagePacks.value[language.code]
-            val sttAsset = pack?.stt
-            val vadAsset = bundledModelManager.vadModel.value
+            val sttPack = try {
+                com.example.model.ModelPack.valueOf("STT_${language.name}")
+            } catch (e: Exception) { null }
+            val vadPack = com.example.model.ModelPack.VAD_MODEL
 
-            if (sttAsset == null || vadAsset == null) {
-                Log.w(TAG, "No offline STT pack shipped for '${language.code}' yet")
+            val sttModelFile = sttPack?.let { modelDownloadManager.modelPath(it) }
+            val vadModelFile = modelDownloadManager.modelPath(vadPack)
+
+            if (sttPack == null || sttModelFile == null || vadModelFile == null) {
+                Log.w(TAG, "No offline STT pack shipped or downloaded for '${language.code}' yet")
                 recognizer?.release()
                 vad?.release()
                 recognizer = null
@@ -178,22 +143,9 @@ class IndicSttEngine(
             try {
                 val start = System.nanoTime()
 
-                // Load from real files on internal storage rather than via AssetManager:
-                // sherpa-onnx's newFromAsset() path reads the whole model into a native
-                // heap buffer through the Android asset API (necessary since assets live
-                // inside the APK's zip, not on a real filesystem path); newFromFile() lets
-                // the underlying ONNX Runtime session open the file directly instead. On a
-                // 141MB STT model that's a real difference on a 2GB-RAM device, so we pay
-                // a one-time extract-to-disk cost (skipped on every load after the first)
-                // to get there. See extractAssetToFile() below.
-                val vadModelFile = extractAssetToFile(vadAsset.modelPath)
-                val sttModelFile = extractAssetToFile(sttAsset.modelPath)
-                val sttTokensFile = extractAssetToFile(sttAsset.tokensPath)
+                val sttInfo = com.example.model.ModelRegistry.getInfo(sttPack)
+                val sttTokensFile = java.io.File(modelDownloadManager.modelsDir, sttInfo?.auxFileName ?: "").absolutePath
 
-                // Scale with actual device capability (see recommendedOrtThreads):
-                // capable hardware decodes noticeably faster with a second worker
-                // thread, while a weak/low-RAM device stays at 1 to avoid the extra
-                // scratch-buffer memory and scheduling contention that buys it nothing.
                 val threads = recommendedOrtThreads(context)
 
                 val newVad = Vad(
@@ -202,11 +154,11 @@ class IndicSttEngine(
                         sileroVadModelConfig = SileroVadModelConfig(
                             model = vadModelFile,
                             threshold = 0.5f,
-                            minSilenceDuration = 0.5f, // pause length that ends a sentence
+                            minSilenceDuration = 0.5f,
                             minSpeechDuration = 0.25f,
-                            windowSize = vadAsset.windowSizeSamples,
+                            windowSize = 512,
                         ),
-                        sampleRate = vadAsset.sampleRateHz,
+                        sampleRate = 16000,
                         numThreads = threads,
                         provider = "cpu",
                     ),
@@ -216,8 +168,8 @@ class IndicSttEngine(
                     assetManager = null,
                     config = OfflineRecognizerConfig(
                         featConfig = FeatureConfig(
-                            sampleRate = sttAsset.sampleRateHz,
-                            featureDim = sttAsset.featureDim,
+                            sampleRate = 16000,
+                            featureDim = 80,
                         ),
                         modelConfig = OfflineModelConfig(
                             nemo = OfflineNemoEncDecCtcModelConfig(model = sttModelFile),
@@ -237,10 +189,9 @@ class IndicSttEngine(
                 loadedLanguageCode = language.code
 
                 _modelInfo.value = SttModelInfo(
-                    name = sttAsset.name,
-                    runtime = "sherpa-onnx nemo_ctc / ONNX Runtime (${sttAsset.architecture})",
-                    modelSizeMb = bundledModelManager.verifiedAssets.value[sttAsset.modelPath]
-                        ?.let { it.sizeBytes / 1_000_000f } ?: 0f,
+                    name = sttPack.displayName,
+                    runtime = "sherpa-onnx nemo_ctc / ONNX Runtime",
+                    modelSizeMb = (sttInfo?.sizeBytes ?: 0L) / 1_000_000f,
                     isQuantized = true,
                     isLoaded = true,
                     inferenceLatencyMs = loadMs.toInt(),
