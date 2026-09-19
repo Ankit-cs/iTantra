@@ -234,9 +234,13 @@ cd iTantra
 
 ### Model weights
 
-The on-device STT/TTS model weights (~2.3GB across 10 languages) are **not** committed to this repo — several individual files exceed GitHub's 100MB limit. The manifest (`app/src/main/assets/models/model_manifest.json`), tokenizer vocabularies, and TTS frontend configs *are* included, describing exactly which upstream checkpoints each language pack expects and where they came from.
+The on-device STT/TTS model weights (~2.3GB across 10 languages) are **dynamically downloaded** via the in-app `ModelDownloadManager`. You do not need to manually bundle or compile them! 
 
-To run the app with real speech, regenerate the ONNX weights with the conversion scripts under `tools/model_conversion/` (`convert_stt.py`, `export_tts.py`) against the source checkpoints listed per-language in `model_manifest.json`, and drop the output into the matching `assets/models/<code>/stt/` and `assets/models/<code>/tts/` folders. Without them, a language simply reports itself as unavailable instead of faking a result — the app runs fine, it just has nothing to say yet.
+The `ModelRegistry` pulls:
+- **STT Models**: directly from HuggingFace (AI4Bharat IndicConformer ONNX exports)
+- **TTS Models**: directly from the k2-fsa/sherpa-onnx GitHub releases (Piper/Coqui/Mimic3 voices).
+
+When you first select a language, the app will prompt you to download the required packages if they aren't already available on-device.
 
 ### Build & run
 
