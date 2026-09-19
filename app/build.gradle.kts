@@ -147,6 +147,8 @@ dependencies {
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
   implementation(libs.protobuf.javalite)
+  implementation("org.apache.commons:commons-compress:1.26.1")
+  implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
   // Real on-device speech pipeline (fully offline, open-source, no cloud calls):
   //  - sherpa-onnx (Apache-2.0): STT (AI4Bharat IndicConformer nemo_ctc models) + real Silero VAD
