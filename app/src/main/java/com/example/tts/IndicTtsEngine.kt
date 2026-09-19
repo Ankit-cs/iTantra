@@ -1,201 +1,109 @@
 package com.example.tts
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
-import android.speech.tts.TextToSpeech
 import android.util.Log
 import com.example.audio.AlertAudioManager
-import com.example.model.BundledModelManager
 import com.example.model.SupportedLanguage
-import com.example.model.recommendedOrtThreads
-import kotlinx.coroutines.CancellationException
+import com.example.model.ModelDownloadManager
+import com.example.model.ModelPack
+import com.example.model.ModelRegistry
+import com.k2fsa.sherpa.onnx.OfflineTts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
+import java.io.File
 import java.text.Normalizer
-import java.util.Locale
-import kotlin.math.max
-import kotlin.math.min
 
-private const val TAG = "IndicTtsEngine"
-/** Hard cap on characters per inference chunk — see [IndicTtsEngine.splitIntoSpeakableChunks]. */
-private const val MAX_CHUNK_CHARS = 140
-
-/** Parsed assets/models/<lang>/tts/frontend.json — the character vocab + text
- * normalization the checkpoint was actually trained with (dumped straight from
- * the real tokenizer at export time, not reverse-engineered). */
-private data class TtsFrontend(
-    val charToId: Map<String, Int>,
-    val sampleRateHz: Int,
-    val defaultSpeakerId: Int,
-)
-
-/**
- * Real, fully offline Text-To-Speech engine: our own exported ONNX graphs of the
- * real AI4Bharat Indic-TTS checkpoint (FastPitch acoustic model -> HiFi-GAN
- * vocoder), run on-device via ONNX Runtime Mobile — zero network calls, zero
- * proprietary TTS engine, zero canned/formant-synth fallback.
- */
 class IndicTtsEngine(
     private val context: Context,
     private val alertAudioManager: AlertAudioManager,
     private val scope: CoroutineScope,
-    val bundledModelManager: BundledModelManager = BundledModelManager(context)
+    private val modelDownloadManager: ModelDownloadManager
 ) : TtsEngine {
-
-    private val _isSpeaking = MutableStateFlow(false)
-    override val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
-
-    private val _currentlyPlayingText = MutableStateFlow<String?>(null)
-    override val currentlyPlayingText: StateFlow<String?> = _currentlyPlayingText.asStateFlow()
-
-    private val _modelInfo = MutableStateFlow(
-        TtsModelInfo(
-            name = "Loading offline TTS models...",
-            runtime = "ONNX Runtime Mobile (FastPitch + HiFi-GAN)",
-            modelSizeMb = 0f,
-            sampleRateHz = 22050,
-            isReady = false
-        )
-    )
-    override val modelInfo: StateFlow<TtsModelInfo> = _modelInfo.asStateFlow()
-
-    private val ortEnv: OrtEnvironment = OrtEnvironment.getEnvironment()
+    private val TAG = "IndicTtsEngine"
+    private var tts: OfflineTts? = null
     private var loadedLanguageCode: String? = null
-    private var fastpitchSession: OrtSession? = null
-    private var hifiganSession: OrtSession? = null
-    private var frontend: TtsFrontend? = null
-    private val modelLock = Mutex()
+    private var job: Job? = null
 
-    private var audioTrack: AudioTrack? = null
-    private var speakJob: Job? = null
-    private var systemTts: TextToSpeech? = null
+    private val _modelInfo = MutableStateFlow(TtsModelInfo())
+    override val modelInfo: StateFlow<TtsModelInfo> = _modelInfo
+    
+    private val _isSpeaking = MutableStateFlow(false)
+    override val isSpeaking: StateFlow<Boolean> = _isSpeaking
+    
+    private val _currentlyPlayingText = MutableStateFlow<String?>(null)
+    override val currentlyPlayingText: StateFlow<String?> = _currentlyPlayingText
 
-    init {
-        scope.launch(Dispatchers.IO) {
-            bundledModelManager.loadAndVerifyBundledModels()
+    fun loadModels(language: SupportedLanguage) {
+        if (loadedLanguageCode == language.code && tts != null) {
+            return
         }
-        try {
-            systemTts = TextToSpeech(context) { status ->
-                if (status == TextToSpeech.SUCCESS) {
-                    Log.i(TAG, "System TextToSpeech initialized")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to initialize System TextToSpeech: ${e.message}")
-        }
-    }
 
-    /** Same extract-once-then-load-by-path pattern as IndicSttEngine.extractAssetToFile —
-     *  see the comment in ensureModelsForLanguage() for why. */
-    private fun extractAssetToFile(relPath: String): String {
-        val outFile = java.io.File(context.filesDir, "models_cache/$relPath")
-        val expectedSize = bundledModelManager.verifiedAssets.value[relPath]?.sizeBytes
-        if (!outFile.exists() || (expectedSize != null && outFile.length() != expectedSize)) {
-            outFile.parentFile?.mkdirs()
-            // 1MB buffer instead of copyTo()'s 8KB default — these are 60-120MB model
-            // files, and the syscall overhead of an 8KB buffer is real time on a
-            // first-run/first-language-switch extraction.
-            context.assets.open("models/$relPath").use { input ->
-                outFile.outputStream().use { output -> input.copyTo(output, bufferSize = 1 shl 20) }
-            }
-        }
-        return outFile.absolutePath
-    }
-
-    private suspend fun ensureModelsForLanguage(language: SupportedLanguage) {
-        modelLock.withLock {
-            if (loadedLanguageCode == language.code && fastpitchSession != null && hifiganSession != null) return
-
-            val pack = bundledModelManager.languagePacks.value[language.code]
-            val ttsAsset = pack?.tts
-            if (ttsAsset == null) {
-                Log.w(TAG, "No offline TTS pack shipped for '${language.code}' yet")
-                fastpitchSession?.close()
-                hifiganSession?.close()
-                fastpitchSession = null
-                hifiganSession = null
-                frontend = null
-                loadedLanguageCode = null
-                _modelInfo.value = _modelInfo.value.copy(name = "No offline TTS model for ${language.englishName}", isReady = false)
-                return
-            }
-
+        job?.cancel()
+        job = scope.launch(Dispatchers.IO) {
             try {
                 val start = System.nanoTime()
 
-                // Extract once to internal storage and load by file path rather than
-                // reading the whole ~60-120MB model into a JVM byte[] and handing that
-                // across JNI: createSession(byte[]) means both the Java array AND ONNX
-                // Runtime's own parsed copy are resident at once, which is exactly the
-                // kind of transient spike a 2GB-RAM device can't absorb. Loading by path
-                // lets ORT read the file itself instead of going through the JVM heap.
-                val fpPath = extractAssetToFile(ttsAsset.acousticModelPath)
-                val hgPath = extractAssetToFile(ttsAsset.vocoderPath)
-                val frontendJson = context.assets.open("models/${ttsAsset.frontendConfigPath}")
-                    .bufferedReader().use { it.readText() }
-
-                val root = JSONObject(frontendJson)
-                val vocabArray = root.getJSONArray("vocab")
-                val charToId = mutableMapOf<String, Int>()
-                for (i in 0 until vocabArray.length()) {
-                    charToId[vocabArray.getString(i)] = i
+                val ttsPack = when (language.code) {
+                    "hi" -> ModelPack.TTS_HINDI
+                    "ml" -> ModelPack.TTS_MALAYALAM
+                    "bn" -> ModelPack.TTS_BENGALI
+                    "gu" -> ModelPack.TTS_GUJARATI
+                    "en" -> ModelPack.TTS_ENGLISH
+                    else -> {
+                        Log.w(TAG, "No TTS voice pack available for '${language.code}'")
+                        _modelInfo.value = _modelInfo.value.copy(name = "Unsupported Language", isReady = false)
+                        return@launch
+                    }
                 }
-                val newFrontend = TtsFrontend(
-                    charToId = charToId,
-                    sampleRateHz = root.optInt("sampleRateHz", 22050),
-                    defaultSpeakerId = root.optInt("defaultSpeakerId", 0),
+
+                val voiceDirName = ModelRegistry.getInfo(ttsPack)?.extractDirName ?: return@launch
+                val espeakDirName = ModelRegistry.getInfo(ModelPack.ESPEAK_NG_DATA)?.extractDirName ?: return@launch
+                
+                val voiceDir = File(context.filesDir, "models/$voiceDirName")
+                val espeakDataDir = File(context.filesDir, "models/$espeakDirName")
+                
+                if (!voiceDir.isDirectory || !espeakDataDir.isDirectory) {
+                    Log.w(TAG, "TTS models for '${language.code}' not downloaded yet.")
+                    _modelInfo.value = _modelInfo.value.copy(name = "Not Downloaded", isReady = false)
+                    return@launch
+                }
+
+                val onnxFile = voiceDir.listFiles { f -> f.extension == "onnx" }?.firstOrNull() ?: return@launch
+                val tokensFile = File(voiceDir, "tokens.txt")
+
+                val config = com.k2fsa.sherpa.onnx.OfflineTtsConfig(
+                    model = com.k2fsa.sherpa.onnx.OfflineTtsModelConfig(
+                        vits = com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig(
+                            model = onnxFile.absolutePath,
+                            tokens = tokensFile.absolutePath,
+                            dataDir = espeakDataDir.absolutePath
+                        ),
+                        numThreads = 2,
+                        debug = false,
+                        provider = "cpu"
+                    )
                 )
 
-                // Scale intra-op threads with actual device capability (see
-                // recommendedOrtThreads) rather than hardcoding 1 — a capable device
-                // synthesizes noticeably faster with 2 worker threads, while a weak/
-                // low-RAM one stays at 1 to avoid the extra scratch-buffer memory and
-                // scheduling overhead. Always 1 inter-op thread: FastPitch and HiFi-GAN
-                // run back-to-back per utterance, not concurrently, so there's nothing
-                // for inter-op parallelism to actually parallelize.
-                val threads = recommendedOrtThreads(context)
-                val sessionOptions = OrtSession.SessionOptions().apply {
-                    setIntraOpNumThreads(threads)
-                    setInterOpNumThreads(1)
-                    setMemoryPatternOptimization(true)
-                }
-                val newFastpitch = ortEnv.createSession(fpPath, sessionOptions)
-                val newHifigan = ortEnv.createSession(hgPath, sessionOptions)
-
-                val loadMs = (System.nanoTime() - start) / 1_000_000L
-
-                fastpitchSession?.close()
-                hifiganSession?.close()
-                fastpitchSession = newFastpitch
-                hifiganSession = newHifigan
-                frontend = newFrontend
+                val newTts = OfflineTts(assetManager = null, config = config)
+                
+                tts?.release()
+                tts = newTts
                 loadedLanguageCode = language.code
 
+                val ttsInfo = ModelRegistry.getInfo(ttsPack)
                 _modelInfo.value = TtsModelInfo(
-                    name = ttsAsset.name,
-                    runtime = "ONNX Runtime Mobile (FastPitch + HiFi-GAN)",
-                    modelSizeMb = bundledModelManager.verifiedAssets.value[ttsAsset.acousticModelPath]
-                        ?.let { it.sizeBytes / 1_000_000f } ?: 0f,
-                    sampleRateHz = newFrontend.sampleRateHz,
+                    name = ttsPack.displayName,
+                    runtime = "sherpa-onnx (VITS)",
+                    modelSizeMb = (ttsInfo?.sizeBytes ?: 0L) / 1_000_000f,
+                    sampleRateHz = newTts.sampleRate(),
                     isReady = true,
                 )
-                Log.i(TAG, "Loaded real TTS for '${language.code}' in ${loadMs}ms")
+                Log.i(TAG, "Loaded TTS for '${language.code}' in ${(System.nanoTime() - start)/1000000}ms")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to load TTS models for '${language.code}'", e)
                 _modelInfo.value = _modelInfo.value.copy(name = "Failed to load model: ${e.message}", isReady = false)
@@ -203,9 +111,6 @@ class IndicTtsEngine(
         }
     }
 
-    /** multilingual_cleaners(): NFC normalize, lowercase, ;/-/: -> ,/space/, ,
-     * strip <>()[]" , collapse whitespace — exactly what the checkpoint was
-     * trained against (see tools/model_conversion/export_tts.py). */
     private fun cleanText(text: String): String {
         var t = Normalizer.normalize(text, Normalizer.Form.NFC)
         t = t.lowercase()
@@ -215,236 +120,87 @@ class IndicTtsEngine(
         return t
     }
 
-    private fun textToIds(text: String, vocab: Map<String, Int>): LongArray {
-        val cleaned = cleanText(text)
-        val ids = mutableListOf<Long>()
-        for (ch in cleaned) {
-            val id = vocab[ch.toString()]
-            if (id != null) {
-                ids.add(id.toLong())
-            } else {
-                Log.d(TAG, "Skipping out-of-vocab character: '$ch'")
-            }
+    private suspend fun generate(text: String, isAlert: Boolean): FloatArray? = withContext(Dispatchers.Default) {
+        val currentTts = tts
+        if (currentTts == null) {
+            Log.w(TAG, "TTS not loaded for generate()")
+            return@withContext null
         }
-        return ids.toLongArray()
-    }
 
-    /** Sentence-ish split so one inference call never has to synthesize an entire
-     *  multi-sentence message at once. This is the main lever for perceived TTS
-     *  speed: playback of chunk 1 starts as soon as it's synthesized, while later
-     *  chunks are still being computed underneath it (see [speak]) — a long alert
-     *  starts being heard in "one sentence's worth" of latency instead of "the
-     *  whole message's worth". It also bounds peak tensor size per inference call,
-     *  which matters for OOM/ANR risk on 2GB-RAM devices given a very long message. */
-    private fun splitIntoSpeakableChunks(text: String): List<String> {
-        val sentenceBoundary = Regex("(?<=[।॥.!?])\\s+")
-        val sentences = text.split(sentenceBoundary).map { it.trim() }.filter { it.isNotEmpty() }
-        val chunks = mutableListOf<String>()
-        for (sentence in sentences) {
-            if (sentence.length <= MAX_CHUNK_CHARS) {
-                chunks += sentence
-                continue
-            }
-            // Very long, unpunctuated sentence: fall back to hard word-boundary slices
-            // rather than handing FastPitch/HiFi-GAN an unbounded sequence length.
-            var remaining = sentence
-            while (remaining.length > MAX_CHUNK_CHARS) {
-                var cut = remaining.lastIndexOf(' ', MAX_CHUNK_CHARS)
-                if (cut <= 0) cut = MAX_CHUNK_CHARS
-                chunks += remaining.substring(0, cut).trim()
-                remaining = remaining.substring(cut).trim()
-            }
-            if (remaining.isNotEmpty()) chunks += remaining
+        try {
+            val startMs = System.currentTimeMillis()
+            val speed = if (isAlert) 1.25f else 1.0f
+            val audio = currentTts.generate(text = cleanText(text), sid = 0, speed = speed)
+            val synthesisMs = System.currentTimeMillis() - startMs
+
+            Log.d(TAG, "sherpa-onnx TTS synthesized ${audio.samples.size} samples @ ${audio.sampleRate}Hz in ${synthesisMs}ms")
+            
+            resampleTo22050(audio.samples, audio.sampleRate)
+        } catch (e: Exception) {
+            Log.e(TAG, "TTS synthesis failed", e)
+            null
         }
-        return chunks.ifEmpty { listOf(text) }
     }
 
     override fun speak(text: String, language: SupportedLanguage, isAlert: Boolean, onDone: () -> Unit) {
-        val trimmed = text.trim()
-        if (trimmed.isEmpty()) {
+        if (text.isBlank()) {
             onDone()
             return
         }
-
-        // A new utterance always preempts whatever this engine was still synthesizing
-        // or playing — without this, speak() calls that arrive faster than playback
-        // (e.g. a burst of incoming packets) would pile up as concurrent AudioTracks
-        // racing each other instead of the newest one winning.
-        speakJob?.cancel()
-
-        _currentlyPlayingText.value = trimmed
         _isSpeaking.value = true
+        _currentlyPlayingText.value = text
 
-        speakJob = scope.launch(Dispatchers.Default) {
-            ensureModelsForLanguage(language)
-            val fastpitch = fastpitchSession
-            val hifigan = hifiganSession
-            val fe = frontend
-
-            if (fastpitch == null || hifigan == null || fe == null) {
-                Log.w(TAG, "Using system TTS / audio alert fallback for ${language.englishName}")
-                if (isAlert) {
-                    alertAudioManager.lockAudioFocusForAlert()
-                    alertAudioManager.playEmergencySirenTone(durationMs = 1200)
-                }
-
-                systemTts?.let { tts ->
-                    val loc = Locale(language.code)
-                    tts.language = loc
-                    tts.speak(trimmed, TextToSpeech.QUEUE_FLUSH, null, "UTT_${System.currentTimeMillis()}")
-                }
-
-                val speakDelayMs = (trimmed.length * 60L).coerceIn(1200L, 5000L)
-                delay(speakDelayMs)
-                finishSpeaking(isAlert, onDone)
-                return@launch
+        scope.launch {
+            loadModels(language)
+            val audio = generate(text, isAlert)
+            if (audio != null) {
+                alertAudioManager.playTts(audio, onDone)
+            } else {
+                onDone()
             }
-
-            var track: AudioTrack? = null
-            try {
-                if (isAlert) {
-                    alertAudioManager.lockAudioFocusForAlert()
-                    alertAudioManager.playEmergencySirenTone(durationMs = 1200)
-                }
-
-                val chunks = splitIntoSpeakableChunks(trimmed)
-                track = openStreamingTrack(fe.sampleRateHz, isAlert)
-                audioTrack = track
-                track.play()
-
-                var totalFramesWritten = 0
-                for (chunk in chunks) {
-                    if (!isActive) break
-                    val ids = textToIds(chunk, fe.charToId)
-                    if (ids.isEmpty()) {
-                        Log.d(TAG, "No synthesizable characters in chunk '$chunk'")
-                        continue
-                    }
-                    val wav = synthesize(fastpitch, hifigan, ids, fe.defaultSpeakerId)
-                    totalFramesWritten += writeStreamingPcm(track, wav)
-                }
-
-                // Writes above only guarantee the audio was accepted into the track's
-                // buffer, not that it has actually been heard yet — wait for real
-                // playback to catch up before reporting done.
-                while (isActive && track.playbackHeadPosition < totalFramesWritten) {
-                    delay(20)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Synthesis failed for '$trimmed'", e)
-            } finally {
-                try { track?.stop() } catch (e: Exception) {}
-                try { track?.release() } catch (e: Exception) {}
-                if (audioTrack === track) audioTrack = null
-                finishSpeaking(isAlert, onDone)
-            }
+            _isSpeaking.value = false
+            _currentlyPlayingText.value = null
         }
-    }
-
-    private fun finishSpeaking(isAlert: Boolean, onDone: () -> Unit) {
-        _isSpeaking.value = false
-        _currentlyPlayingText.value = null
-        if (isAlert) alertAudioManager.releaseAlertAudioFocus()
-        onDone()
-    }
-
-    /** input_ids [1,N] + speaker_id [1] -> mel [1,T,80] (FastPitch), transposed
-     * to [1,80,T] and fed to HiFi-GAN -> wav [1,1,samples]. Both graphs are
-     * genuinely dynamic-shaped (see export_tts.py) — no padding, no bucketing. */
-    private fun synthesize(
-        fastpitch: OrtSession,
-        hifigan: OrtSession,
-        ids: LongArray,
-        speakerId: Int,
-    ): FloatArray {
-        val mel: Array<FloatArray> = OnnxTensor.createTensor(ortEnv, arrayOf(ids)).use { inputTensor ->
-            OnnxTensor.createTensor(ortEnv, longArrayOf(speakerId.toLong())).use { speakerTensor ->
-                fastpitch.run(mapOf("input_ids" to inputTensor, "speaker_id" to speakerTensor)).use { results ->
-                    @Suppress("UNCHECKED_CAST")
-                    val melBatch = results[0].value as Array<Array<FloatArray>>
-                    melBatch[0] // [T, 80]
-                }
-            }
-        }
-
-        val numMels = mel[0].size
-        val numFrames = mel.size
-        val melChw = Array(1) { Array(numMels) { m -> FloatArray(numFrames) { t -> mel[t][m] } } }
-
-        val wavBatch: Array<Array<FloatArray>> = OnnxTensor.createTensor(ortEnv, melChw).use { melTensor ->
-            hifigan.run(mapOf("mel" to melTensor)).use { results ->
-                @Suppress("UNCHECKED_CAST")
-                results[0].value as Array<Array<FloatArray>>
-            }
-        }
-        return wavBatch[0][0]
-    }
-
-    /** MODE_STREAM (not MODE_STATIC) so chunks can be handed to the track as each one
-     *  finishes synthesizing, rather than needing the entire utterance's PCM buffered
-     *  up front before any sound can start. */
-    private fun openStreamingTrack(sampleRateHz: Int, isAlert: Boolean): AudioTrack {
-        val minBuf = AudioTrack.getMinBufferSize(sampleRateHz, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        return AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(if (isAlert) AudioAttributes.USAGE_ALARM else AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(sampleRateHz)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build()
-            )
-            .setBufferSizeInBytes(max(minBuf, minBuf * 2))
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-    }
-
-    /** Blocking write of one chunk's PCM16 samples; returns frame count written so
-     *  the caller can track total frames against [AudioTrack.getPlaybackHeadPosition]. */
-    private fun writeStreamingPcm(track: AudioTrack, samples: FloatArray): Int {
-        val pcm = ShortArray(samples.size) { i ->
-            (max(-1f, min(1f, samples[i])) * 32767f).toInt().toShort()
-        }
-        var offset = 0
-        while (offset < pcm.size) {
-            val written = track.write(pcm, offset, pcm.size - offset)
-            if (written <= 0) break
-            offset += written
-        }
-        return pcm.size
     }
 
     override fun preload(language: SupportedLanguage) {
-        scope.launch(Dispatchers.Default) { ensureModelsForLanguage(language) }
+        loadModels(language)
     }
 
     override fun stop() {
-        speakJob?.cancel()
-        try {
-            audioTrack?.stop()
-            audioTrack?.release()
-        } catch (e: Exception) {
-            // ignore
-        }
-        audioTrack = null
+        alertAudioManager.stopTts()
         _isSpeaking.value = false
         _currentlyPlayingText.value = null
-        alertAudioManager.releaseAlertAudioFocus()
-        alertAudioManager.stopHaptics()
     }
 
     override fun shutdown() {
         stop()
-        fastpitchSession?.close()
-        hifiganSession?.close()
-        fastpitchSession = null
-        hifiganSession = null
+        release()
+    }
+
+    private fun resampleTo22050(waveform: FloatArray, sourceSampleRate: Int): FloatArray {
+        val targetRate = 22050
+        if (sourceSampleRate == targetRate) return waveform
+        val ratio = targetRate.toDouble() / sourceSampleRate
+        val outputLength = (waveform.size * ratio).toInt()
+        val resampled = FloatArray(outputLength)
+
+        for (i in resampled.indices) {
+            val srcIdx = i / ratio
+            val floor = srcIdx.toInt()
+            val frac = (srcIdx - floor).toFloat()
+
+            resampled[i] = if (floor + 1 < waveform.size) {
+                waveform[floor] * (1f - frac) + waveform[floor + 1] * frac
+            } else {
+                waveform.getOrElse(floor) { 0f }
+            }
+        }
+        return resampled
+    }
+
+    fun release() {
+        tts?.release()
+        tts = null
     }
 }
